@@ -49,7 +49,7 @@ CONFIG_UPDATE_HAS_UPDATE_FILE="$CONFIG_UPDATE_CACHE_DIR/config_has_update"
 CONFIG_UPDATE_NOTICE=""
 
 _config_update_latest_remote() {
-    local api_url="https://api.github.com/repos/IndeecFOX/zapret4rocket/commits?path=config.default&per_page=1"
+    local api_url="https://api.github.com/repos/kostazol/zapret4rocket/commits?path=config.default&sha=improving_policy&per_page=1"
     local body remote_sha remote_date
 
     body="$(curl -s --max-time 8 "$api_url")"
