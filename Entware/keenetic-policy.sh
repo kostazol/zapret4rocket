@@ -3,6 +3,8 @@
 KEENETIC_POLICY_COMMENT="z4r-keenetic-policy"
 KEENETIC_POLICY_SHOW_CMD="show ip policy"
 KEENETIC_ZAPRET_CONFIG="/opt/zapret/config"
+KEENETIC_POLICY_CACHE_DIR="/opt/zapret/extra_strats/cache"
+KEENETIC_POLICY_MARK_CACHE="$KEENETIC_POLICY_CACHE_DIR/keenetic-policy.mark"
 
 keenetic_policy_log() {
     echo "[keenetic-policy] $*"
@@ -17,6 +19,32 @@ keenetic_policy_load_config() {
 keenetic_policy_is_enabled() {
     keenetic_policy_load_config
     [ -n "$POLICY_NAME" ]
+}
+
+keenetic_policy_cache_mark() {
+    local policy_mark="$1"
+
+    [ -n "$POLICY_NAME" ] || return 0
+    [ -n "$policy_mark" ] || return 0
+
+    mkdir -p "$KEENETIC_POLICY_CACHE_DIR" 2>/dev/null || return 0
+    {
+        printf 'POLICY_NAME=%s\n' "$POLICY_NAME"
+        printf 'POLICY_MARK=%s\n' "$policy_mark"
+    } > "$KEENETIC_POLICY_MARK_CACHE" 2>/dev/null || true
+}
+
+keenetic_policy_get_cached_mark() {
+    local cached_name cached_mark
+
+    [ -f "$KEENETIC_POLICY_MARK_CACHE" ] || return 1
+    cached_name="$(sed -n 's/^POLICY_NAME=//p' "$KEENETIC_POLICY_MARK_CACHE" | tail -n1)"
+    cached_mark="$(sed -n 's/^POLICY_MARK=//p' "$KEENETIC_POLICY_MARK_CACHE" | tail -n1)"
+
+    [ "$cached_name" = "$POLICY_NAME" ] || return 1
+    [ -n "$cached_mark" ] || return 1
+
+    printf '%s\n' "$cached_mark"
 }
 
 keenetic_policy_ndmc_is_supported() {
@@ -131,14 +159,15 @@ keenetic_policy_apply_rules() {
     keenetic_policy_is_enabled || return 0
 
     if ! keenetic_policy_ndmc_is_supported; then
-        keenetic_policy_log "ndmc is unavailable in the current shell context, policy integration disabled"
-        return 0
-    fi
-
-    policy_mark="$(keenetic_policy_get_mark)"
-    if [ -z "$policy_mark" ]; then
-        keenetic_policy_log "policy '$POLICY_NAME' not found, fallback to default nfqws behaviour"
-        return 0
+        policy_mark="$(keenetic_policy_get_cached_mark)"
+        [ -n "$policy_mark" ] || return 0
+    else
+        policy_mark="$(keenetic_policy_get_mark)"
+        if [ -z "$policy_mark" ]; then
+            keenetic_policy_log "policy '$POLICY_NAME' not found, fallback to default nfqws behaviour"
+            return 0
+        fi
+        keenetic_policy_cache_mark "$policy_mark"
     fi
 
     keenetic_policy_insert_rules_family iptables "$policy_mark"
