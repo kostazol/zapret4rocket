@@ -82,6 +82,27 @@ keenetic_policy_get_mark() {
     '
 }
 
+keenetic_policy_normalize_mark() {
+    local policy_mark="$1"
+
+    [ -n "$policy_mark" ] || return 1
+
+    case "$policy_mark" in
+        0x[0-9a-fA-F]*)
+            printf '%s\n' "$policy_mark"
+            ;;
+        *[a-fA-F]*)
+            printf '0x%s\n' "$policy_mark"
+            ;;
+        [0-9]*)
+            printf '%s\n' "$policy_mark"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 keenetic_policy_mark_args() {
     keenetic_policy_load_config
     local policy_mark="$1"
@@ -122,12 +143,14 @@ keenetic_policy_insert_rules_family() {
     local cmd="$1"
     local policy_mark="$2"
     local seen=""
+    local rules line out_if proto port_flag ports signature policy_args
 
     command -v "$cmd" >/dev/null 2>&1 || return 0
 
-    "$cmd"-save -t mangle 2>/dev/null | grep -- "-j NFQUEUE" | grep "^-A POSTROUTING " | while IFS= read -r line; do
-        local out_if proto port_flag ports signature policy_args
+    rules="$("$cmd"-save -t mangle 2>/dev/null | grep -- "-j NFQUEUE" | grep "^-A POSTROUTING ")"
+    [ -n "$rules" ] || return 1
 
+    printf '%s\n' "$rules" | while IFS= read -r line; do
         out_if="$(keenetic_policy_extract_field "$line" '.* -o \([^[:space:]]\+\).*')"
         proto="$(keenetic_policy_extract_field "$line" '.* -p \([^[:space:]]\+\).*')"
         port_flag="$(printf '%s\n' "$line" | sed -n 's/.* \(-m multiport --\(dports\|sports\)\|--\(dport\|sport\)\) [^[:space:]]\+.*/\1/p' | head -n1)"
@@ -145,33 +168,53 @@ keenetic_policy_insert_rules_family() {
         policy_args="$(keenetic_policy_mark_args "$policy_mark")"
 
         if [ -n "$out_if" ]; then
-            "$cmd" -t mangle -I POSTROUTING 1 -o "$out_if" -p "$proto" $port_flag "$ports" $policy_args -m comment --comment "$KEENETIC_POLICY_COMMENT" -j ACCEPT >/dev/null 2>&1 || true
+            "$cmd" -t mangle -I POSTROUTING 1 -o "$out_if" -p "$proto" $port_flag "$ports" $policy_args -m comment --comment "$KEENETIC_POLICY_COMMENT" -j ACCEPT >/dev/null 2>&1 || exit 1
         else
-            "$cmd" -t mangle -I POSTROUTING 1 -p "$proto" $port_flag "$ports" $policy_args -m comment --comment "$KEENETIC_POLICY_COMMENT" -j ACCEPT >/dev/null 2>&1 || true
+            "$cmd" -t mangle -I POSTROUTING 1 -p "$proto" $port_flag "$ports" $policy_args -m comment --comment "$KEENETIC_POLICY_COMMENT" -j ACCEPT >/dev/null 2>&1 || exit 1
         fi
     done
+
+    "$cmd"-save -t mangle 2>/dev/null | grep -q -- "$KEENETIC_POLICY_COMMENT"
 }
 
 keenetic_policy_apply_rules() {
-    local policy_mark
+    local raw_policy_mark policy_mark inserted_any=0
 
     keenetic_policy_cleanup_rules
     keenetic_policy_is_enabled || return 0
 
     if ! keenetic_policy_ndmc_is_supported; then
-        policy_mark="$(keenetic_policy_get_cached_mark)"
-        [ -n "$policy_mark" ] || return 0
+        raw_policy_mark="$(keenetic_policy_get_cached_mark)"
+        [ -n "$raw_policy_mark" ] || return 0
     else
-        policy_mark="$(keenetic_policy_get_mark)"
-        if [ -z "$policy_mark" ]; then
+        raw_policy_mark="$(keenetic_policy_get_mark)"
+        if [ -z "$raw_policy_mark" ]; then
             keenetic_policy_log "policy '$POLICY_NAME' not found, fallback to default nfqws behaviour"
             return 0
         fi
-        keenetic_policy_cache_mark "$policy_mark"
     fi
 
-    keenetic_policy_insert_rules_family iptables "$policy_mark"
-    keenetic_policy_insert_rules_family ip6tables "$policy_mark"
+    policy_mark="$(keenetic_policy_normalize_mark "$raw_policy_mark")"
+    if [ -z "$policy_mark" ]; then
+        keenetic_policy_log "invalid policy mark '$raw_policy_mark', fallback to default nfqws behaviour"
+        return 0
+    fi
+
+    keenetic_policy_cache_mark "$policy_mark"
+
+    if keenetic_policy_insert_rules_family iptables "$policy_mark"; then
+        inserted_any=1
+    else
+        keenetic_policy_log "failed to insert iptables policy rules for mark $policy_mark"
+    fi
+
+    if keenetic_policy_insert_rules_family ip6tables "$policy_mark"; then
+        inserted_any=1
+    else
+        keenetic_policy_log "failed to insert ip6tables policy rules for mark $policy_mark"
+    fi
+
+    [ "$inserted_any" = "1" ] || return 0
 
     if [ "$POLICY_EXCLUDE" = "1" ]; then
         keenetic_policy_log "excluding Keenetic policy '$POLICY_NAME' (mark $policy_mark) from nfqws"
